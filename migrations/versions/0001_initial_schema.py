@@ -17,37 +17,22 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # --- ENUM types ---
-    entry_type_enum = sa.Enum(
-        "note", "task", "transaction", "fact", "event", "metric", "project", "unknown",
-        name="entry_type_enum",
-    )
-    entry_type_enum.create(op.get_bind(), checkfirst=True)
-
-    transaction_type_enum = sa.Enum(
-        "income", "expense", "transfer", name="transaction_type_enum"
-    )
-    transaction_type_enum.create(op.get_bind(), checkfirst=True)
-
-    task_status_enum = sa.Enum(
-        "pending", "in_progress", "done", "cancelled", name="task_status_enum"
-    )
-    task_status_enum.create(op.get_bind(), checkfirst=True)
-
-    project_status_enum = sa.Enum(
-        "active", "paused", "done", "archived", name="project_status_enum"
-    )
-    project_status_enum.create(op.get_bind(), checkfirst=True)
+    # ENUMs are created implicitly by op.create_table on first use.
+    # Each enum name appears in exactly one table — no duplicates possible.
 
     # --- entries ---
     op.create_table(
         "entries",
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("raw", sa.Text(), nullable=False),
-        sa.Column("entry_type", sa.Enum(
-            "note", "task", "transaction", "fact", "event", "metric", "project", "unknown",
-            name="entry_type_enum", create_type=False,
-        ), nullable=False),
+        sa.Column(
+            "entry_type",
+            sa.Enum(
+                "note", "task", "transaction", "fact", "event", "metric", "project", "unknown",
+                name="entry_type_enum",
+            ),
+            nullable=False,
+        ),
         sa.Column("source", sa.String(64), nullable=True),
         sa.Column("day", sa.Date(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
@@ -94,9 +79,11 @@ def upgrade() -> None:
         sa.Column("entry_id", sa.Integer(), nullable=True),
         sa.Column("amount", sa.Numeric(18, 2), nullable=False),
         sa.Column("currency", sa.String(8), nullable=False),
-        sa.Column("tx_type", sa.Enum(
-            "income", "expense", "transfer", name="transaction_type_enum", create_type=False
-        ), nullable=False),
+        sa.Column(
+            "tx_type",
+            sa.Enum("income", "expense", "transfer", name="transaction_type_enum"),
+            nullable=False,
+        ),
         sa.Column("category", sa.String(64), nullable=True),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("day", sa.Date(), nullable=False),
@@ -113,9 +100,11 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("name", sa.String(256), nullable=False),
         sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("status", sa.Enum(
-            "active", "paused", "done", "archived", name="project_status_enum", create_type=False
-        ), nullable=False),
+        sa.Column(
+            "status",
+            sa.Enum("active", "paused", "done", "archived", name="project_status_enum"),
+            nullable=False,
+        ),
         sa.Column("start_date", sa.Date(), nullable=True),
         sa.Column("end_date", sa.Date(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
@@ -131,9 +120,11 @@ def upgrade() -> None:
         sa.Column("project_id", sa.Integer(), nullable=True),
         sa.Column("title", sa.String(256), nullable=False),
         sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("status", sa.Enum(
-            "pending", "in_progress", "done", "cancelled", name="task_status_enum", create_type=False
-        ), nullable=False),
+        sa.Column(
+            "status",
+            sa.Enum("pending", "in_progress", "done", "cancelled", name="task_status_enum"),
+            nullable=False,
+        ),
         sa.Column("due_date", sa.Date(), nullable=True),
         sa.Column("day", sa.Date(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
@@ -194,17 +185,17 @@ def upgrade() -> None:
     op.create_index("ix_daily_logs_id", "daily_logs", ["id"])
     op.create_index("ix_daily_logs_day", "daily_logs", ["day"])
 
-    # --- seed default rules ---
+    # --- seed default routing rules ---
     op.execute("""
         INSERT INTO rules_router (name, pattern, target, entry_type, priority, is_active, description)
         VALUES
-          ('task_prefix',      '^(TODO|TASK|tarea|hacer)',         'tasks',         'task',        100, true, 'Lines starting with TODO/TASK/tarea/hacer'),
-          ('income_keyword',   '(ingreso|income|cobré|cobré|cobr)', 'transactions', 'transaction', 90,  true, 'Income transactions'),
-          ('expense_keyword',  '(gast|pagué|pague|compré|compre|expense|paid)', 'transactions', 'transaction', 80, true, 'Expense transactions'),
-          ('fact_keyword',     '^(FACT|DATO|nota|note):',           'facts',         'fact',        70,  true, 'Explicit fact entries'),
-          ('metric_keyword',   '^(METRIC|METRICA|KPI):',            'metrics_daily', 'metric',     60,  true, 'Metric entries'),
-          ('project_keyword',  '^(PROJECT|PROYECTO):',              'projects',      'project',    50,  true, 'Project entries'),
-          ('default_note',     '.*',                                'facts',         'note',        0,   true, 'Catch-all: store as fact/note')
+          ('task_prefix',      '^(TODO|TASK|tarea|hacer)',                     'tasks',         'task',        100, true, 'Lines starting with TODO/TASK/tarea/hacer'),
+          ('income_keyword',   '(ingreso|income|cobr)',                        'transactions',  'transaction',  90, true, 'Income transactions'),
+          ('expense_keyword',  '(gast|pagué|pague|compré|compre|expense|paid)','transactions',  'transaction',  80, true, 'Expense transactions'),
+          ('fact_keyword',     '^(FACT|DATO|nota|note):',                      'facts',         'fact',         70, true, 'Explicit fact entries'),
+          ('metric_keyword',   '^(METRIC|METRICA|KPI):',                       'metrics_daily', 'metric',       60, true, 'Metric entries'),
+          ('project_keyword',  '^(PROJECT|PROYECTO):',                         'projects',      'project',      50, true, 'Project entries'),
+          ('default_note',     '.*',                                           'facts',         'note',          0, true, 'Catch-all: store as fact/note')
     """)
 
 
