@@ -59,9 +59,44 @@ class TestIngest:
         assert body["entry_type"] == "note"
         assert body["routed_to"] == "facts"
 
-    def test_ingest_with_source(self, client):
+    def test_ingest_with_source_slack(self, client):
         r = client.post("/ingest", json={"raw": "TODO: revisar PR", "source": "slack"})
         assert r.status_code == 201
+        assert r.json()["source"] == "slack"
+
+    def test_ingest_with_source_voice(self, client):
+        r = client.post("/ingest", json={"raw": "nota de voz importante", "source": "voice"})
+        assert r.status_code == 201
+        assert r.json()["source"] == "voice"
+
+    def test_ingest_invalid_source_rejected(self, client):
+        r = client.post("/ingest", json={"raw": "test", "source": "carrier_pigeon"})
+        assert r.status_code == 422
+        body = r.json()
+        assert body["code"] == "VALIDATION_ERROR"
+
+    def test_ingest_returns_routed_entity_task(self, client):
+        r = client.post("/ingest", json={"raw": "TODO: check routed_entity"})
+        assert r.status_code == 201
+        body = r.json()
+        assert body["routed_entity"] is not None
+        assert body["routed_entity"]["type"] == "task"
+        assert "title" in body["routed_entity"]
+
+    def test_ingest_returns_routed_entity_transaction(self, client):
+        r = client.post("/ingest", json={"raw": "gasté $99 en libros"})
+        assert r.status_code == 201
+        body = r.json()
+        entity = body["routed_entity"]
+        assert entity["type"] == "transaction"
+        assert entity["tx_type"] == "expense"
+        assert entity["amount"] == "99.00"
+
+    def test_ingest_returns_routed_entity_fact(self, client):
+        r = client.post("/ingest", json={"raw": "FACT: Python es genial"})
+        assert r.status_code == 201
+        body = r.json()
+        assert body["routed_entity"]["type"] == "fact"
 
     def test_ingest_with_explicit_day(self, client):
         r = client.post("/ingest", json={"raw": "nota del pasado", "day": "2026-01-15"})

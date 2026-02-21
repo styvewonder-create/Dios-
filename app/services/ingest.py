@@ -1,13 +1,22 @@
 """
-Ingest service: persists a raw entry and fans out to the right table
-based on the deterministic router result.
+Ingest service: routes and persists entries, fans out to domain tables.
+
+Public API
+----------
+ingest_raw(raw, db, source, day)   → IngestResult   (single, transactional)
+ingest_batch(items, db)            → list[dict]      (per-item savepoints)
+
+Internal
+--------
+_ingest_one(raw, db, source, day)  → IngestResult   (flush only, no commit)
 """
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
@@ -20,12 +29,35 @@ from app.models.project import Project, ProjectStatus
 from app.services.router import route_entry, RoutingResult
 
 
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class IngestResult:
+    """Holds the persisted Entry and the domain entity created by fan-out."""
+    entry: Entry
+    domain_entity: Any = field(default=None)  # Task | Transaction | Fact | MetricDaily | Project | None
+
+
+@dataclass
+class BatchItem:
+    """Lightweight DTO so the service layer stays schema-agnostic."""
+    raw: str
+    source: Optional[str] = None
+    day: Optional[date] = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _today() -> date:
     return datetime.now(tz=timezone.utc).date()
 
 
 def _extract_amount(text: str) -> Optional[Decimal]:
-    """Try to extract a numeric amount from free text."""
+    """Extract the first numeric amount from free text."""
     match = re.search(r"[\$€]?\s*(\d[\d,\.]*)", text)
     if match:
         try:
@@ -44,17 +76,20 @@ def _detect_tx_type(text: str) -> str:
     return TransactionType.expense
 
 
-def ingest_raw(
+# ---------------------------------------------------------------------------
+# Core — flush only (used by both single and batch paths)
+# ---------------------------------------------------------------------------
+
+def _ingest_one(
     raw: str,
     db: Session,
-    source: Optional[str] = None,
-    day: Optional[date] = None,
-) -> Entry:
+    source: Optional[str],
+    day: Optional[date],
+) -> IngestResult:
     """
-    Main ingest function:
-    1. Route the entry
-    2. Persist to entries table
-    3. Fan-out to domain table
+    Route → persist entry → fan-out.
+    Calls db.flush() to obtain entry.id but does NOT commit.
+    The caller is responsible for commit / rollback.
     """
     target_day = day or _today()
     result: RoutingResult = route_entry(raw, db)
@@ -68,48 +103,66 @@ def ingest_raw(
         rule_matched=result.rule_name,
     )
     db.add(entry)
-    db.flush()  # get entry.id
+    db.flush()  # get entry.id before fan-out
 
-    # --- Fan-out ---
+    domain_entity = _fan_out(entry, result, target_day, db)
+    db.flush()
+
+    return IngestResult(entry=entry, domain_entity=domain_entity)
+
+
+def _fan_out(
+    entry: Entry,
+    result: RoutingResult,
+    day: date,
+    db: Session,
+) -> Any:
+    """Create the domain record corresponding to the routed target."""
     target = result.target
 
-    if target == "facts":
-        fact = Fact(
+    if target == "tasks":
+        title = re.sub(
+            r"^(TODO|TASK|tarea|hacer)\s*[:\-]?\s*", "", entry.raw, flags=re.IGNORECASE
+        ).strip()
+        obj = Task(
             entry_id=entry.id,
-            content=raw,
-            category=result.entry_type,
-            day=target_day,
-        )
-        db.add(fact)
-
-    elif target == "tasks":
-        title = re.sub(r"^(TODO|TASK|tarea|hacer)\s*[:\-]?\s*", "", raw, flags=re.IGNORECASE).strip()
-        task = Task(
-            entry_id=entry.id,
-            title=title or raw,
+            title=title or entry.raw,
             status=TaskStatus.pending,
-            day=target_day,
+            day=day,
         )
-        db.add(task)
+        db.add(obj)
+        return obj
 
-    elif target == "transactions":
-        amount = _extract_amount(raw) or Decimal("0.00")
-        tx = Transaction(
+    if target == "transactions":
+        amount = _extract_amount(entry.raw) or Decimal("0.00")
+        obj = Transaction(
             entry_id=entry.id,
             amount=amount,
             currency="USD",
-            tx_type=_detect_tx_type(raw),
-            description=raw,
-            day=target_day,
+            tx_type=_detect_tx_type(entry.raw),
+            description=entry.raw,
+            day=day,
         )
-        db.add(tx)
+        db.add(obj)
+        return obj
 
-    elif target == "metrics_daily":
-        # Format expected: "METRIC: name=value unit"
-        name = "unknown"
-        value = Decimal("0")
-        unit = None
-        m = re.search(r"METRIC[A-Z]*\s*:\s*(\w[\w\s]*?)\s*=\s*([\d\.]+)\s*(\w+)?", raw, re.IGNORECASE)
+    if target == "facts":
+        obj = Fact(
+            entry_id=entry.id,
+            content=entry.raw,
+            category=result.entry_type,
+            day=day,
+        )
+        db.add(obj)
+        return obj
+
+    if target == "metrics_daily":
+        name, value, unit = "unknown", Decimal("0"), None
+        m = re.search(
+            r"(?:METRIC|METRICA|KPI)\s*:\s*(\w[\w\s]*?)\s*=\s*([\d\.]+)\s*(\w+)?",
+            entry.raw,
+            re.IGNORECASE,
+        )
         if m:
             name = m.group(1).strip()
             try:
@@ -117,23 +170,75 @@ def ingest_raw(
             except InvalidOperation:
                 pass
             unit = m.group(3)
-        metric = MetricDaily(
-            entry_id=entry.id,
-            name=name,
-            value=value,
-            unit=unit,
-            day=target_day,
-        )
-        db.add(metric)
+        obj = MetricDaily(entry_id=entry.id, name=name, value=value, unit=unit, day=day)
+        db.add(obj)
+        return obj
 
-    elif target == "projects":
-        proj_name = re.sub(r"^(PROJECT|PROYECTO)\s*[:\-]?\s*", "", raw, flags=re.IGNORECASE).strip()
-        project = Project(
-            name=proj_name or raw,
-            status=ProjectStatus.active,
-        )
-        db.add(project)
+    if target == "projects":
+        proj_name = re.sub(
+            r"^(PROJECT|PROYECTO)\s*[:\-]?\s*", "", entry.raw, flags=re.IGNORECASE
+        ).strip()
+        obj = Project(name=proj_name or entry.raw, status=ProjectStatus.active)
+        db.add(obj)
+        return obj
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Public — single entry
+# ---------------------------------------------------------------------------
+
+def ingest_raw(
+    raw: str,
+    db: Session,
+    source: Optional[str] = None,
+    day: Optional[date] = None,
+) -> IngestResult:
+    """Route, persist, and commit a single entry. Returns IngestResult."""
+    ir = _ingest_one(raw, db, source, day)
+    db.commit()
+    db.refresh(ir.entry)
+    if ir.domain_entity is not None:
+        try:
+            db.refresh(ir.domain_entity)
+        except Exception:
+            pass
+    return ir
+
+
+# ---------------------------------------------------------------------------
+# Public — batch
+# ---------------------------------------------------------------------------
+
+def ingest_batch(items: list[BatchItem], db: Session) -> list[dict]:
+    """
+    Ingest a list of items using one savepoint per item.
+    A failure on one item does not cancel the others.
+    Returns a list of raw dicts for the router to convert to BatchItemResult.
+    """
+    raw_results = []
+
+    for i, item in enumerate(items):
+        savepoint = db.begin_nested()
+        try:
+            ir = _ingest_one(item.raw, db, item.source, item.day)
+            savepoint.commit()
+            raw_results.append({"index": i, "ok": True, "result": ir, "error": None})
+        except Exception as exc:
+            savepoint.rollback()
+            raw_results.append({"index": i, "ok": False, "result": None, "error": str(exc)})
 
     db.commit()
-    db.refresh(entry)
-    return entry
+
+    # Refresh successfully persisted entities after the outer commit
+    for r in raw_results:
+        if r["ok"] and r["result"] is not None:
+            try:
+                db.refresh(r["result"].entry)
+                if r["result"].domain_entity is not None:
+                    db.refresh(r["result"].domain_entity)
+            except Exception:
+                pass
+
+    return raw_results
