@@ -7,6 +7,9 @@ from .project import Project
 from .rule import RuleRouter
 from .memory import MemorySnapshot
 from .daily_log import DailyLog
+from .narrative_memory import NarrativeMemory
+from .north_star import NorthStarSnapshot
+from .behavior_event import BehaviorEvent
 
 __all__ = [
     "Entry",
@@ -18,4 +21,7 @@ __all__ = [
     "RuleRouter",
     "MemorySnapshot",
     "DailyLog",
+    "NarrativeMemory",
+    "NorthStarSnapshot",
+    "BehaviorEvent",
 ]
