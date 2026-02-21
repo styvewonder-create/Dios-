@@ -3,6 +3,9 @@ Metrics router — North Star and future system-wide KPIs.
 
 GET /metrics/north-star            — weekly Clarity Score (7-day window)
 GET /metrics/north-star/day        — single-day Complete Day evaluation
+
+Both endpoints automatically trigger the Behavioral Engine after calculating
+the weekly score so reactions (events, tasks) are always kept in sync.
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ from app.services.north_star_service import (
     WeeklyClarity,
     DailyClarity,
 )
+from app.services.behavior_engine import evaluate_and_react
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -80,13 +84,12 @@ def north_star(
     2. **≥ 1 task completed** OR **≥ 1 transaction recorded**.
     3. A **daily narrative memory snapshot** has been compiled for that day.
 
-    The result is persisted in `north_star_snapshots` (upsert) so historical
-    scores can be queried without recalculating.
-
-    Returns the score plus a per-day breakdown so clients can surface
-    exactly which criterion failed for incomplete days.
+    The result is persisted in `north_star_snapshots` (upsert) and then the
+    **Behavioral Engine** is triggered, which may emit `behavior_events` and
+    auto-create tasks depending on the score and streak patterns.
     """
     result = get_north_star(db=db, reference_date=reference_date)
+    evaluate_and_react(db=db, weekly=result)
     return _weekly_to_response(result)
 
 

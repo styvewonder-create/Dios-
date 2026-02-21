@@ -6,6 +6,7 @@ from app.routers import ingest as ingest_router
 from app.routers import state as state_router
 from app.routers import memory as memory_router
 from app.routers import metrics as metrics_router
+from app.routers import behavior as behavior_router
 from app.core.errors import (
     DIOSException,
     dios_exception_handler,
@@ -45,6 +46,7 @@ app.include_router(ingest_router.router)
 app.include_router(state_router.router)
 app.include_router(memory_router.router)
 app.include_router(metrics_router.router)
+app.include_router(behavior_router.router)
 
 
 @app.get("/health", tags=["health"], summary="Health check")
