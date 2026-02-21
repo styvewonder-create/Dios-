@@ -1,0 +1,15 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+# start.sh runs migrations then gunicorn
+startCommand = "bash start.sh"
+
+# Railway calls GET /health every 30 s.
+# A non-2xx response or timeout marks the deploy as unhealthy and triggers a rollback.
+healthcheckPath = "/health"
+healthcheckTimeout = 300        # seconds to wait on first boot (migrations can be slow)
+
+# Restart up to 10 times on crash before giving up.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
